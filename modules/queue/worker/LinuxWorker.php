@@ -4,8 +4,9 @@
  * Hệ thống Queue NukeViet - Worker Linux
  *
  * @version 1.0
- * @author AI Assistant
- * @copyright (C) 2026 VINADES.,JSC. All rights reserved
+ * @author Huỳnh Quốc Đạt <work@hqd.vn>
+ * @website https://huynhquocdat.vn
+ * @copyright (C) 2026 Huỳnh Quốc Đạt. All rights reserved
  * @license GNU/GPL version 2 or any later version
  *
  * Worker này sử dụng pcntl_fork để tạo tiến trình con cho mỗi công việc.

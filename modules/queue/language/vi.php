@@ -1,6 +1,6 @@
 <?php
 
-$lang_translator['author'] = 'Antigravity';
+$lang_translator['author'] = 'Huỳnh Quốc Đạt <work@hqd.vn>';
 $lang_translator['createdate'] = '31/01/2026';
 $lang_translator['copyright'] = '@Copyright (C) 2026';
 $lang_translator['info'] = '';

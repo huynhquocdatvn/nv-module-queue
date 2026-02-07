@@ -4,8 +4,9 @@
  * Hệ thống Queue NukeViet - Các hàm Dispatcher
  *
  * @version 1.0
- * @author Antigravity
- * @copyright (C) 2026 VINADES.,JSC. All rights reserved
+ * @author Huỳnh Quốc Đạt <work@hqd.vn>
+ * @website https://huynhquocdat.vn
+ * @copyright (C) 2026 Huỳnh Quốc Đạt. All rights reserved
  * @license GNU/GPL version 2 or any later version
  *
  * Tệp này chứa hàm dispatcher để đẩy các công việc vào hàng đợi

@@ -2,7 +2,8 @@
 
 /**
  * @Project NUKEVIET 5.x
- * @Author Antigravity
+ * @Author Huỳnh Quốc Đạt <work@hqd.vn>
+ * @Website https://huynhquocdat.vn
  * @Copyright (C) 2026
  * @License GNU/GPL version 2 or any later version
  */

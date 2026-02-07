@@ -180,7 +180,11 @@ class LinuxWorker extends AbstractWorker
                 $this->processJob($job);
                 $this->jobsProcessed++;
             } elseif ($pid === 0) {
-                // Tiến trình con
+                // Tiến trình con - kết nối lại Redis để tránh chia sẻ file descriptor
+                if ($this->driver === 'redis' && $this->redis !== null) {
+                    $this->redis->disconnect();
+                    $this->connectRedis();
+                }
                 try {
                     $result = $this->processJob($job);
                     exit($result ? 0 : 1);

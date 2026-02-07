@@ -33,8 +33,22 @@ $sql_create_module[] = "INSERT IGNORE INTO " . $db_config['prefix'] . "_config (
 $sql_create_module[] = "INSERT IGNORE INTO " . $db_config['prefix'] . "_config (lang, module, config_name, config_value) VALUES ('sys', '" . $module_name . "', 'redis_db', '0')";
 $sql_create_module[] = "INSERT IGNORE INTO " . $db_config['prefix'] . "_config (lang, module, config_name, config_value) VALUES ('sys', '" . $module_name . "', 'redis_prefix', 'nv_queue_')";
 
-// Drop table on uninstall
+// 1.1 Create Failed Jobs Table
+$failedTableName = $db_config['prefix'] . '_queue_failed_jobs';
+
+$sql_create_module[] = "CREATE TABLE IF NOT EXISTS " . $failedTableName . " (
+    id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+    queue VARCHAR(255) NOT NULL DEFAULT 'default',
+    payload LONGTEXT NOT NULL,
+    exception LONGTEXT DEFAULT NULL,
+    failed_at INT(10) UNSIGNED NOT NULL,
+    PRIMARY KEY (id),
+    KEY queue_failed_at (queue, failed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+// Drop tables on uninstall
 $sql_drop_module[] = "DROP TABLE IF EXISTS " . $tableName;
+$sql_drop_module[] = "DROP TABLE IF EXISTS " . $failedTableName;
 
 // Remove config on uninstall
 $sql_drop_module[] = "DELETE FROM " . $db_config['prefix'] . "_config WHERE module='" . $module_name . "'";

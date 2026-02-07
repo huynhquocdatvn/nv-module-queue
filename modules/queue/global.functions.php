@@ -20,37 +20,27 @@ if (!defined('NV_MAINFILE')) {
 /**
  * Dispatch một công việc vào hệ thống hàng đợi.
  *
- * Hàm này hỗ trợ hai chế độ dựa trên $global_config['sys_use_queue']:
- * - Chế độ 1 (Redis Async): Đẩy công việc vào Redis để xử lý nền
- * - Chế độ 0 (Sync Fallback): Sử dụng "Fire and Forget" để xử lý ngay sau khi phản hồi
+ * Hàm này hỗ trợ hai chế độ dựa trên cấu hình queue:
+ * - Chế độ Async: Đẩy công việc vào Redis/Database để xử lý nền
+ * - Chế độ Sync Fallback: Sử dụng register_shutdown_function để xử lý sau khi phản hồi
  *
  * @param string $module Tên module (ví dụ: 'news', 'users')
  * @param string $handler Tên lớp handler (ví dụ: 'SendEmail', 'Jobs\NotifyUser')
  * @param array $data Dữ liệu công việc để chuyển cho handler
  * @param int $priority Mức ưu tiên công việc (thấp hơn = ưu tiên cao hơn, sử dụng trong tương lai)
  * @return bool True nếu công việc được dispatch thành công
- *
- * @example
- * // Dispatch một công việc gửi thông báo
- * nv_dispatch_job('news', 'SendNotification', [
- *     'article_id' => 123,
- *     'user_ids' => [1, 2, 3],
- * ]);
  */
 function nv_dispatch_job(string $module, string $handler, array $data = [], int $priority = 0): bool
 {
     global $site_mods, $db, $db_config;
 
     // Xác thực module tồn tại (kiểm tra mềm - worker sẽ xác thực lại)
-    // Trong ngữ cảnh CLI hoặc khi dispatch async, $site_mods có thể chưa được tải đầy đủ
-    // Worker sẽ thực hiện xác thực module thích hợp trước khi thực thi công việc
     if (isset($site_mods) && is_array($site_mods) && !empty($site_mods)) {
         if (!isset($site_mods[$module])) {
             trigger_error("nv_dispatch_job: Module '{$module}' not found or not active", E_USER_WARNING);
             return false;
         }
     }
-
 
     // Xây dựng payload công việc
     $job = [
@@ -69,17 +59,17 @@ function nv_dispatch_job(string $module, string $handler, array $data = [], int 
 
     if ($useQueue) {
         $driver = $queue_config['driver'] ?? 'database';
-        
+
         if ($driver === 'database') {
             return nv_dispatch_job_database($job);
         }
 
-        // Chế độ 1: Redis Async (Mặc định)
+        // Chế độ Redis Async
         return nv_dispatch_job_async($job, $queue_config);
-    } else {
-        // Chế độ 0: Sync Fallback với Fire and Forget
-        return nv_dispatch_job_sync($job);
     }
+
+    // Chế độ Sync Fallback với shutdown function
+    return nv_dispatch_job_sync($job);
 }
 
 /**
@@ -98,17 +88,13 @@ function nv_dispatch_job_database(array $job): bool
     }
 
     $tableName = ($db_config['prefix'] ?? 'nv4') . '_queue_jobs';
-    
-    // Đảm bảo bảng tồn tại (kiểm tra đơn giản để tránh overhead, thường nên được tạo bởi migration)
-    // Chúng ta dựa vào khối catch để xử lý bảng bị thiếu nếu cần, hoặc tạo nó một lần.
-    // Lý tưởng nhất là việc này nên được thực hiện trong cài đặt/cập nhật module.
-    
+
     $payload = json_encode($job, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
     $createdAt = time();
-    $availableAt = time(); // Có thể hỗ trợ công việc bị trì hoãn sau này
+    $availableAt = time();
 
     $sql = "INSERT INTO " . $tableName . " (queue, payload, attempts, reserved_at, available_at, created_at) VALUES (:queue, :payload, 0, NULL, :available_at, :created_at)";
-    
+
     $dataInsert = [
         'queue' => 'default',
         'payload' => $payload,
@@ -122,7 +108,7 @@ function nv_dispatch_job_database(array $job): bool
     } catch (\Throwable $e) {
         // Thử tạo bảng nếu nó không tồn tại
         if (strpos($e->getMessage(), "doesn't exist") !== false) {
-             try {
+            try {
                 $createSql = "CREATE TABLE IF NOT EXISTS " . $tableName . " (
                     id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
                     queue VARCHAR(255) NOT NULL DEFAULT 'default',
@@ -135,18 +121,71 @@ function nv_dispatch_job_database(array $job): bool
                     KEY queue_reserved_available (queue, reserved_at, available_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;";
                 $db->query($createSql);
-                
+
                 // Thử lại insert
                 $result = $db->insert_id($sql, 'id', $dataInsert);
                 return $result > 0;
-             } catch (\Throwable $ex) {
-                 trigger_error('nv_dispatch_job: Failed to create table or insert job to Database: ' . $ex->getMessage(), E_USER_WARNING);
-                 return false;
-             }
+            } catch (\Throwable $ex) {
+                trigger_error('nv_dispatch_job: Failed to create table or insert job to Database: ' . $ex->getMessage(), E_USER_WARNING);
+                return false;
+            }
         }
-        
+
         trigger_error('nv_dispatch_job: Failed to insert job to Database: ' . $e->getMessage(), E_USER_WARNING);
         return false;
+    }
+}
+
+/**
+ * Lấy hoặc tạo kết nối Redis dùng chung cho request hiện tại
+ *
+ * @param array $queue_config Cấu hình queue
+ * @return \Predis\Client|null
+ */
+function nv_queue_get_redis(array $queue_config): ?\Predis\Client
+{
+    static $redis = null;
+
+    if ($redis !== null) {
+        return $redis;
+    }
+
+    if (empty($queue_config['redis_host'])) {
+        trigger_error(
+            'nv_dispatch_job: Redis configuration is not defined. Please configure Redis in Queue module admin.',
+            E_USER_WARNING
+        );
+        return null;
+    }
+
+    if (!class_exists('\\Predis\\Client')) {
+        trigger_error(
+            'nv_dispatch_job: Predis library is not installed. Unable to use Redis queue.',
+            E_USER_WARNING
+        );
+        return null;
+    }
+
+    $options = [
+        'scheme' => 'tcp',
+        'host' => $queue_config['redis_host'] ?? '127.0.0.1',
+        'port' => (int) ($queue_config['redis_port'] ?? 6379),
+    ];
+
+    if (!empty($queue_config['redis_pass'])) {
+        $options['password'] = $queue_config['redis_pass'];
+    }
+
+    if (isset($queue_config['redis_db'])) {
+        $options['database'] = (int) $queue_config['redis_db'];
+    }
+
+    try {
+        $redis = new \Predis\Client($options);
+        return $redis;
+    } catch (\Throwable $e) {
+        trigger_error('nv_queue_get_redis: Failed to connect to Redis: ' . $e->getMessage(), E_USER_WARNING);
+        return null;
     }
 }
 
@@ -154,6 +193,7 @@ function nv_dispatch_job_database(array $job): bool
  * Đẩy công việc vào hàng đợi Redis (Chế độ Async)
  *
  * @param array $job Payload công việc
+ * @param array $queue_config Cấu hình queue
  * @return bool True nếu đẩy thành công
  */
 function nv_dispatch_job_async(array $job, array $queue_config = []): bool
@@ -162,46 +202,13 @@ function nv_dispatch_job_async(array $job, array $queue_config = []): bool
         $queue_config = nv_queue_get_config();
     }
 
-    // Xác thực cấu hình Redis
-    if (empty($queue_config['redis_host'])) {
-        trigger_error(
-            'nv_dispatch_job: Redis configuration is not defined in database. ' .
-            'Please configure Redis in Queue module admin.',
-            E_USER_WARNING
-        );
-        return false;
-    }
-
-    if (!class_exists('\\Predis\\Client')) {
-        trigger_error(
-            'nv_dispatch_job: Predis library is not installed. Unable to use Redis queue.',
-            E_USER_WARNING
-        );
+    $redis = nv_queue_get_redis($queue_config);
+    if ($redis === null) {
         return false;
     }
 
     try {
-        // Tạo kết nối Redis
-        $options = [
-            'scheme' => 'tcp',
-            'host' => $queue_config['redis_host'] ?? '127.0.0.1',
-            'port' => (int) ($queue_config['redis_port'] ?? 6379),
-        ];
-
-        if (!empty($queue_config['redis_pass'])) {
-            $options['password'] = $queue_config['redis_pass'];
-        }
-
-        if (isset($queue_config['redis_db'])) {
-            $options['database'] = (int) $queue_config['redis_db'];
-        }
-
-        $redis = new \Predis\Client($options);
-
-        // Xây dựng tên hàng đợi
         $queueName = ($queue_config['redis_prefix'] ?? 'nv_queue_') . 'jobs';
-
-        // Đẩy công việc vào hàng đợi
         $payload = json_encode($job, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         $redis->rpush($queueName, [$payload]);
 
@@ -213,16 +220,13 @@ function nv_dispatch_job_async(array $job, array $queue_config = []): bool
 }
 
 /**
- * Xử lý công việc đồng bộ bằng kỹ thuật "Fire and Forget".
+ * Xử lý công việc đồng bộ bằng register_shutdown_function.
  *
- * Phương thức này:
- * 1. Làm sạch bộ đệm đầu ra
- * 2. Gửi header phản hồi để đóng kết nối với client
- * 3. Sử dụng fastcgi_finish_request() nếu có sẵn
- * 4. Tiếp tục xử lý công việc sau khi kết nối đã đóng
+ * Phương thức này đăng ký công việc để chạy sau khi PHP hoàn tất
+ * gửi response cho client, không can thiệp vào output buffer hiện tại.
  *
  * @param array $job Payload công việc
- * @return bool True nếu công việc được thực thi thành công
+ * @return bool True nếu đăng ký thành công
  */
 function nv_dispatch_job_sync(array $job): bool
 {
@@ -232,15 +236,7 @@ function nv_dispatch_job_sync(array $job): bool
     $data = $job['data'];
 
     // Xây dựng tên lớp đầy đủ
-    if (str_contains($handler, '\\')) {
-        if (str_starts_with($handler, 'NukeViet\\')) {
-            $handlerClass = $handler;
-        } else {
-            $handlerClass = "NukeViet\\Module\\{$module}\\{$handler}";
-        }
-    } else {
-        $handlerClass = "NukeViet\\Module\\{$module}\\Jobs\\{$handler}";
-    }
+    $handlerClass = nv_queue_resolve_handler($module, $handler);
 
     // Xác minh handler tồn tại
     if (!class_exists($handlerClass)) {
@@ -253,13 +249,22 @@ function nv_dispatch_job_sync(array $job): bool
         return false;
     }
 
-    // Sử dụng kỹ thuật Fire and Forget
-    nv_fire_and_forget(function () use ($handlerClass, $data) {
+    // Đăng ký xử lý sau khi response hoàn tất
+    register_shutdown_function(function () use ($handlerClass, $data) {
+        // Đóng session để không chặn request khác
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+
+        // Kết thúc request cho client nếu dùng PHP-FPM
+        if (function_exists('fastcgi_finish_request')) {
+            fastcgi_finish_request();
+        }
+
         try {
-            return $handlerClass::handle($data);
+            $handlerClass::handle($data);
         } catch (\Throwable $e) {
             trigger_error("nv_dispatch_job sync error: " . $e->getMessage(), E_USER_WARNING);
-            return false;
         }
     });
 
@@ -267,67 +272,21 @@ function nv_dispatch_job_sync(array $job): bool
 }
 
 /**
- * Thực thi một callback sau khi gửi phản hồi cho client.
+ * Giải quyết tên lớp handler đầy đủ từ tên ngắn
  *
- * Điều này thực hiện mẫu "Fire and Forget":
- * 1. Làm sạch bộ đệm đầu ra và chuẩn bị phản hồi
- * 2. Gửi header phản hồi để đóng kết nối
- * 3. Sử dụng fastcgi_finish_request() nếu có sẵn (PHP-FPM)
- * 4. Tiếp tục chạy callback trong nền
- *
- * @param callable $callback Hàm để thực thi trong nền
- * @return void
+ * @param string $module Tên module
+ * @param string $handler Tên handler
+ * @return string Tên lớp đầy đủ
  */
-function nv_fire_and_forget(callable $callback): void
+function nv_queue_resolve_handler(string $module, string $handler): string
 {
-    // Cho phép script tiếp tục sau khi client ngắt kết nối
-    ignore_user_abort(true);
-
-    // Loại bỏ giới hạn thời gian
-    set_time_limit(0);
-
-    // Đóng session để ngăn chặn chặn các yêu cầu khác
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        session_write_close();
+    if (str_contains($handler, '\\')) {
+        if (str_starts_with($handler, 'NukeViet\\')) {
+            return $handler;
+        }
+        return "NukeViet\\Module\\{$module}\\{$handler}";
     }
-
-    // Làm sạch bộ đệm đầu ra
-    $level = ob_get_level();
-    for ($i = 0; $i < $level; $i++) {
-        ob_end_clean();
-    }
-
-    // Bắt đầu bộ đệm đầu ra mới
-    ob_start();
-
-    // Body phản hồi tối thiểu
-    echo json_encode(['status' => 'queued']);
-
-    // Lấy độ dài nội dung
-    $size = ob_get_length();
-
-    // Gửi header để đóng kết nối
-    header('Content-Type: application/json; charset=utf-8');
-    header('Content-Length: ' . $size);
-    header('Connection: close');
-
-    // Flush và đóng kết nối
-    ob_end_flush();
-
-    if (function_exists('ob_flush')) {
-        @ob_flush();
-    }
-
-    @flush();
-
-    // Nếu sử dụng PHP-FPM, sử dụng fastcgi_finish_request để đóng kết nối đúng cách
-    if (function_exists('fastcgi_finish_request')) {
-        fastcgi_finish_request();
-    }
-
-    // Bây giờ thực thi callback trong nền
-    // Client đã nhận phản hồi và kết nối đã đóng
-    $callback();
+    return "NukeViet\\Module\\{$module}\\Jobs\\{$handler}";
 }
 
 /**
@@ -355,7 +314,7 @@ function nv_queue_stats(): array
 
     if ($driver === 'database') {
         if (!is_object($db)) {
-             $db = new \NukeViet\Core\Database($db_config);
+            $db = new \NukeViet\Core\Database($db_config);
         }
         $tableName = ($db_config['prefix'] ?? 'nv4') . '_queue_jobs';
         try {
@@ -369,39 +328,25 @@ function nv_queue_stats(): array
                 'redis_connected' => false,
             ];
         } catch (\Throwable $e) {
-             return [
+            return [
                 'queue_driver' => 'database',
                 'error' => $e->getMessage()
             ];
         }
     }
 
-    if (!isset($redis_config) || !is_array($redis_config)) {
-        return ['error' => 'Redis not configured'];
-    }
-
-    if (!class_exists('\\Predis\\Client')) {
-        return ['error' => 'Predis library not installed'];
+    // Redis stats
+    $redis = nv_queue_get_redis($queue_config);
+    if ($redis === null) {
+        return [
+            'queue_driver' => 'redis',
+            'error' => 'Redis not configured or Predis not installed',
+            'redis_connected' => false,
+        ];
     }
 
     try {
-        $options = [
-            'scheme' => 'tcp',
-            'host' => $queue_config['redis_host'] ?? '127.0.0.1',
-            'port' => (int) ($queue_config['redis_port'] ?? 6379),
-        ];
-
-        if (!empty($queue_config['redis_pass'])) {
-            $options['password'] = $queue_config['redis_pass'];
-        }
-
-        if (isset($queue_config['redis_db'])) {
-            $options['database'] = (int) $queue_config['redis_db'];
-        }
-
-        $redis = new \Predis\Client($options);
         $queueName = ($queue_config['redis_prefix'] ?? 'nv_queue_') . 'jobs';
-
         return [
             'queue_driver' => 'redis',
             'queue_name' => $queueName,
@@ -416,6 +361,7 @@ function nv_queue_stats(): array
         ];
     }
 }
+
 /**
  * Lấy cấu hình hệ thống hàng đợi từ database.
  *
@@ -439,10 +385,9 @@ function nv_queue_get_config(): array
             $config[$row['config_name']] = $row['config_value'];
         }
     } catch (\Throwable $e) {
-        // Fallback or handle error
+        // Fallback to defaults
     }
 
-    // Mặc định nếu không tìm thấy
     $cache_config = array_merge([
         'active' => 0,
         'driver' => 'database',

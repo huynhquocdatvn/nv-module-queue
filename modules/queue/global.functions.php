@@ -88,10 +88,15 @@ function nv_dispatch_job_database(array $job): bool
     }
 
     $tableName = ($db_config['prefix'] ?? 'nv4') . '_queue_jobs';
-
-    $payload = json_encode($job, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
     $createdAt = time();
     $availableAt = time();
+
+    try {
+        $payload = json_encode($job, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+    } catch (\JsonException $e) {
+        trigger_error('nv_dispatch_job: Failed to encode job payload: ' . $e->getMessage(), E_USER_WARNING);
+        return false;
+    }
 
     $sql = "INSERT INTO " . $tableName . " (queue, payload, attempts, reserved_at, available_at, created_at) VALUES (:queue, :payload, 0, NULL, :available_at, :created_at)";
 

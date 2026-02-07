@@ -70,19 +70,79 @@ require $autoloadPath;
  * kết nối DB ban đầu vì lý do bảo mật. Tuy nhiên, worker cần
  * mật khẩu để kết nối lại database cho mỗi công việc.
  *
- * Giải pháp: Tải trước config.php để lấy mật khẩu, sau đó khôi phục
- * nó sau khi mainfile.php chạy.
+ * Giải pháp: Sử dụng token_get_all để parse PHP an toàn, xử lý được
+ * các trường hợp password có ký tự đặc biệt như quotes, escaped chars.
  */
 $configPath = NV_ROOTDIR . '/config.php';
 $saved_dbpass = null;
 if (file_exists($configPath)) {
-    // Đọc nội dung file config
     $content = file_get_contents($configPath);
-    
-    // Trích xuất dbpass sử dụng regex để tránh phải require file
-    // Điều này ngăn chặn xung đột NV_MAINFILE và thoát với 'Stop!!!'
-    if (preg_match('/\$db_config\[[\'"]dbpass[\'"]\]\s*=\s*[\'"](.*?)[\'"]\s*;/', $content, $matches)) {
-        $saved_dbpass = $matches[1];
+    $tokens = token_get_all($content);
+    $tokenCount = count($tokens);
+
+    for ($i = 0; $i < $tokenCount; $i++) {
+        // Tìm pattern: $db_config['dbpass'] = 'value';
+        if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_VARIABLE || $tokens[$i][1] !== '$db_config') {
+            continue;
+        }
+
+        // Kiểm tra ['dbpass']
+        $j = $i + 1;
+        // Bỏ qua whitespace
+        while ($j < $tokenCount && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
+            $j++;
+        }
+        if ($j >= $tokenCount || $tokens[$j] !== '[') {
+            continue;
+        }
+        $j++;
+        // Bỏ qua whitespace
+        while ($j < $tokenCount && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
+            $j++;
+        }
+        if ($j >= $tokenCount || !is_array($tokens[$j]) || $tokens[$j][0] !== T_CONSTANT_ENCAPSED_STRING) {
+            continue;
+        }
+        $key = trim($tokens[$j][1], "\"'");
+        if ($key !== 'dbpass') {
+            continue;
+        }
+        $j++;
+        // Bỏ qua whitespace và ]
+        while ($j < $tokenCount && (is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE)) {
+            $j++;
+        }
+        if ($j >= $tokenCount || $tokens[$j] !== ']') {
+            continue;
+        }
+        $j++;
+        // Bỏ qua whitespace và =
+        while ($j < $tokenCount && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
+            $j++;
+        }
+        if ($j >= $tokenCount || $tokens[$j] !== '=') {
+            continue;
+        }
+        $j++;
+        // Bỏ qua whitespace
+        while ($j < $tokenCount && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
+            $j++;
+        }
+        // Lấy giá trị string
+        if ($j < $tokenCount && is_array($tokens[$j]) && $tokens[$j][0] === T_CONSTANT_ENCAPSED_STRING) {
+            $rawValue = $tokens[$j][1];
+            // Xử lý escape sequences tùy theo quote type
+            $quote = $rawValue[0];
+            $inner = substr($rawValue, 1, -1);
+            if ($quote === '"') {
+                // Double quotes: xử lý escape sequences
+                $saved_dbpass = stripcslashes($inner);
+            } else {
+                // Single quotes: chỉ xử lý \' và \\
+                $saved_dbpass = str_replace(["\\'" , "\\\\"], ["'", "\\"], $inner);
+            }
+            break;
+        }
     }
 }
 

@@ -438,14 +438,14 @@ abstract class AbstractWorker
         // Xác thực các trường bắt buộc
         if (empty($module) || empty($handler)) {
             $this->log("Invalid job: missing module or handler", 'error');
-            $this->removeFromProcessingQueue($job);
+            $this->handleFailedJob($job, 'Invalid job: missing module or handler');
             return false;
         }
 
         // Kiểm tra xem module có hoạt động không
         if (!$this->isModuleActive($module)) {
             $this->log("Module '{$module}' is not active, skipping job", 'warning');
-            $this->removeFromProcessingQueue($job);
+            $this->handleFailedJob($job, "Module '{$module}' is not active");
             return false;
         }
 
@@ -454,6 +454,7 @@ abstract class AbstractWorker
             $this->reconnectDatabase();
         } catch (\Exception $e) {
             $this->log("Database reconnection failed: " . $e->getMessage(), 'error');
+            // Không gọi handleFailedJob vì DB không khả dụng, job sẽ timeout và được retry
             return false;
         }
 
@@ -462,13 +463,13 @@ abstract class AbstractWorker
 
         if (!class_exists($handlerClass)) {
             $this->log("Handler class not found: {$handlerClass}", 'error');
-            $this->removeFromProcessingQueue($job);
+            $this->handleFailedJob($job, "Handler class not found: {$handlerClass}");
             return false;
         }
 
         if (!method_exists($handlerClass, 'handle')) {
             $this->log("Handler class {$handlerClass} does not have a handle() method", 'error');
-            $this->removeFromProcessingQueue($job);
+            $this->handleFailedJob($job, "Handler class {$handlerClass} missing handle() method");
             return false;
         }
 
@@ -488,7 +489,7 @@ abstract class AbstractWorker
                 }
             } else {
                 $this->log("Job {$jobId} returned false after {$duration}ms", 'warning');
-                $this->handleFailedJob($job);
+                $this->handleFailedJob($job, 'Job handler returned false');
             }
 
             return (bool) $result;
@@ -496,7 +497,7 @@ abstract class AbstractWorker
             $this->log("Job {$jobId} failed: " . $e->getMessage(), 'error');
             $this->log("Stack trace: " . $e->getTraceAsString(), 'debug');
 
-            $this->handleFailedJob($job);
+            $this->handleFailedJob($job, $e->getMessage());
 
             return false;
         }
@@ -617,8 +618,11 @@ abstract class AbstractWorker
 
     /**
      * Xử lý công việc thất bại bằng cách release hoặc lưu vào failed_jobs
+     *
+     * @param array $job Dữ liệu công việc
+     * @param string|null $exception Thông báo lỗi (nếu có)
      */
-    protected function handleFailedJob(array $job): void
+    protected function handleFailedJob(array $job, ?string $exception = null): void
     {
         global $db, $db_config;
 
@@ -649,15 +653,18 @@ abstract class AbstractWorker
         } else {
             // Đã đạt số lần thử tối đa - lưu vào failed_jobs
             $this->log("Job {$id} exceeded max attempts ({$this->maxAttempts}). Moving to failed_jobs.", 'error');
-            $this->moveToFailedJobs($job);
+            $this->moveToFailedJobs($job, $exception);
             $this->deleteJobFromDatabase($id);
         }
     }
 
     /**
      * Lưu công việc thất bại vào bảng failed_jobs
+     *
+     * @param array $job Dữ liệu công việc
+     * @param string|null $exception Thông báo lỗi
      */
-    protected function moveToFailedJobs(array $job): void
+    protected function moveToFailedJobs(array $job, ?string $exception = null): void
     {
         global $db, $db_config;
 
@@ -668,11 +675,12 @@ abstract class AbstractWorker
         unset($payload['__db_id'], $payload['__raw_data'], $payload['attempts']);
 
         try {
+            $exceptionMsg = $exception ?? 'Exceeded max attempts (' . $this->maxAttempts . ')';
             $sql = "INSERT INTO " . $tableName . " (queue, payload, exception, failed_at) VALUES (:queue, :payload, :exception, :failed_at)";
             $db->insert_id($sql, 'id', [
                 'queue' => 'default',
                 'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE),
-                'exception' => 'Exceeded max attempts (' . $this->maxAttempts . ')',
+                'exception' => $exceptionMsg,
                 'failed_at' => time(),
             ]);
         } catch (\Exception $e) {

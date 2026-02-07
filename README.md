@@ -466,8 +466,7 @@ nv-module-queue/
 
 ## Tác giả
 
-- **Antigravity**
-- VINADES.,JSC - https://nukeviet.vn
+- **Huỳnh Quốc Đạt** - work@hqd.vn - https://huynhquocdat.vn
 
 ## License
 
